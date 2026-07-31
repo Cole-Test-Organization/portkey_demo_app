@@ -1,0 +1,52 @@
+{
+  "strategy": {
+    "mode": "conditional",
+    "conditions": [
+      {
+        "query": {
+          "metadata.user_role": {
+            "$eq": "sales"
+          }
+        },
+        "then": "role-1-route"
+      },
+      {
+        "query": {
+          "metadata.user_role": {
+            "$eq": "hr"
+          }
+        },
+        "then": "role-2-route"
+      },
+      {
+        "query": {
+          "metadata.user_role": {
+            "$eq": "devs"
+          }
+        },
+        "then": "role-3-route"
+      }
+    ],
+    "default": "role-1-route"
+  },
+  "targets": [
+    {
+      "name": "role-1-route",
+      "override_params": {
+        "model": "@gemini-example/gemini-3.5-flash-lite"
+      }
+    },
+    {
+      "name": "role-2-route",
+      "override_params": {
+        "model": "@gemini-example/gemini-3.6-flash"
+      }
+    },
+    {
+      "name": "role-3-route",
+      "override_params": {
+        "model": "@gemini-example/gemini-3.5-flash"
+      }
+    }
+  ]
+}

@@ -1,0 +1,38 @@
+# Local secrets and environment overrides
+.env
+.env.*
+!.env.example
+*.env
+*.env.*
+!*.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+
+# Generated runtime state
+/portkey-role-routing-config.json
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+*.egg-info/
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Local output
+*.log
+coverage/
+build/
+dist/

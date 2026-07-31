@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="A simple role-based AI model routing demo."
+    />
+    <title>AI Role Demo</title>
+    <link rel="stylesheet" href="/styles.css?v=5" />
+    <script src="/app.js?v=5" defer></script>
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="container header-inner">
+        <a class="brand" href="/" aria-label="AI Role Demo home">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <span>AI Role Demo</span>
+        </a>
+
+        <div class="header-actions">
+          <button class="button button-quiet" id="setup-button" type="button">
+            Setup
+          </button>
+          <button
+            class="icon-button"
+            id="theme-toggle"
+            type="button"
+            aria-label="Switch to dark mode"
+            title="Switch theme"
+          >
+            <svg class="sun-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="4"></circle>
+              <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"></path>
+            </svg>
+            <svg class="moon-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M20.2 15.7A8.5 8.5 0 0 1 8.3 3.8a8.5 8.5 0 1 0 11.9 11.9Z"></path>
+            </svg>
+          </button>
+
+          <div class="profile-switcher" id="profile-switcher">
+            <button
+              class="profile-trigger"
+              id="profile-trigger"
+              type="button"
+              aria-haspopup="menu"
+              aria-expanded="false"
+              aria-label="Sales. Switch role"
+            >
+              <span class="profile-avatar" id="profile-avatar">S</span>
+              <span class="profile-copy">
+                <strong id="profile-role">Sales</strong>
+              </span>
+              <svg class="chevron" viewBox="0 0 20 20" aria-hidden="true">
+                <path d="m6 8 4 4 4-4"></path>
+              </svg>
+            </button>
+            <div
+              class="profile-menu"
+              id="profile-menu"
+              role="menu"
+              aria-label="Switch role"
+              hidden
+            >
+              <p>Switch role</p>
+              <div id="profile-options"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <main class="container page">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">Role-based routing</p>
+          <h1>One prompt. Three AI experiences.</h1>
+          <p class="hero-copy">
+            Choose a role, send a prompt, and see which model handled it.
+          </p>
+        </div>
+        <div class="status" id="service-status" aria-live="polite">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span>Checking service</span>
+        </div>
+      </section>
+
+      <section class="demo-card">
+        <header class="route-summary">
+          <div>
+            <span class="field-label">Active experience</span>
+            <strong id="selected-role">Sales</strong>
+            <small id="experience-copy">Bright, fast, and ready to move.</small>
+          </div>
+          <div class="model-readout">
+            <span class="field-label">Expected model</span>
+            <code id="expected-model">@gemini-example/gemini-3.5-flash-lite</code>
+          </div>
+        </header>
+
+        <div class="prompt-field">
+          <div class="field-row">
+            <label for="prompt">Prompt</label>
+            <span><span id="prompt-count">0</span> / <span id="prompt-limit">32,000</span></span>
+          </div>
+          <textarea
+            id="prompt"
+            rows="8"
+            maxlength="32000"
+            spellcheck="true"
+            placeholder="Ask anything…"
+          ></textarea>
+        </div>
+
+        <div class="card-actions">
+          <span class="shortcut">⌘ Enter to send</span>
+          <div>
+            <button class="button button-quiet" id="clear-button" type="button">
+              Clear
+            </button>
+            <button class="button button-primary" id="send-button" type="button">
+              Send
+            </button>
+          </div>
+        </div>
+
+        <section class="response-panel" id="response" aria-live="polite">
+          <div class="empty-state">
+            <span aria-hidden="true">✦</span>
+            <p>Your response will appear here.</p>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <footer class="container site-footer">
+      <p>Role-aware AI routing demo</p>
+    </footer>
+
+    <dialog class="setup-dialog" id="setup-dialog">
+      <form id="setup-form">
+        <header class="dialog-header">
+          <div>
+            <p class="eyebrow">Onboarding</p>
+            <h2>Configure this demo</h2>
+          </div>
+          <button
+            class="icon-button"
+            id="setup-close"
+            type="button"
+            aria-label="Close setup"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="m6 6 12 12M18 6 6 18"></path>
+            </svg>
+          </button>
+        </header>
+
+        <p class="dialog-copy">
+          Add your profile slug, name each role, and choose its Google model.
+          The current defaults are already filled in.
+        </p>
+
+        <div class="form-grid">
+          <label class="form-field form-field-wide">
+            <span>Service API key</span>
+            <input
+              id="setup-service-key"
+              name="serviceKey"
+              type="password"
+              autocomplete="current-password"
+              required
+              placeholder="Required to save"
+            />
+            <small>
+              Used to authorize and save setup. It is never returned to the browser.
+            </small>
+          </label>
+
+          <label class="form-field form-field-wide">
+            <span>LLM profile slug</span>
+            <input
+              id="setup-provider-slug"
+              name="providerSlug"
+              type="text"
+              required
+              value="gemini-example"
+              placeholder="gemini-example"
+            />
+          </label>
+        </div>
+
+        <div class="role-setup-list">
+          <fieldset class="role-setup" data-slot="1">
+            <legend>Role 1</legend>
+            <label class="form-field">
+              <span>Role name</span>
+              <input class="setup-role-label" type="text" required value="Sales" />
+            </label>
+            <label class="form-field">
+              <span>Google model</span>
+              <input
+                class="setup-role-model"
+                type="text"
+                required
+                value="gemini-3.5-flash-lite"
+              />
+            </label>
+          </fieldset>
+
+          <fieldset class="role-setup" data-slot="2">
+            <legend>Role 2</legend>
+            <label class="form-field">
+              <span>Role name</span>
+              <input class="setup-role-label" type="text" required value="HR" />
+            </label>
+            <label class="form-field">
+              <span>Google model</span>
+              <input
+                class="setup-role-model"
+                type="text"
+                required
+                value="gemini-3.6-flash"
+              />
+            </label>
+          </fieldset>
+
+          <fieldset class="role-setup" data-slot="3">
+            <legend>Role 3</legend>
+            <label class="form-field">
+              <span>Role name</span>
+              <input class="setup-role-label" type="text" required value="Devs" />
+            </label>
+            <label class="form-field">
+              <span>Google model</span>
+              <input
+                class="setup-role-model"
+                type="text"
+                required
+                value="gemini-3.5-flash"
+              />
+            </label>
+          </fieldset>
+        </div>
+
+        <p class="form-message" id="setup-message" role="status" hidden></p>
+
+        <section class="routing-output" id="routing-output" hidden>
+          <div class="field-row">
+            <label for="routing-json">Generated routing JSON</label>
+            <button class="text-button" id="copy-routing-json" type="button">
+              Copy JSON
+            </button>
+          </div>
+          <textarea id="routing-json" rows="9" readonly></textarea>
+          <small>
+            Paste this into the saved routing configuration attached to your
+            service key, then save it.
+          </small>
+        </section>
+
+        <footer class="dialog-actions">
+          <button class="button button-quiet" id="setup-cancel" type="button">
+            Cancel
+          </button>
+          <button class="button button-primary" id="setup-save" type="submit">
+            Save setup
+          </button>
+        </footer>
+      </form>
+    </dialog>
+
+    <template id="loading-template">
+      <div class="loading-state">
+        <span></span><span></span><span></span>
+        <p>Thinking…</p>
+      </div>
+    </template>
+  </body>
+</html>

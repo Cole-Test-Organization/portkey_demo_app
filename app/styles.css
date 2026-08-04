@@ -907,8 +907,7 @@ input::placeholder {
   font-weight: 750;
 }
 
-.form-field small,
-.routing-output small {
+.form-field small {
   color: var(--muted);
   font-size: 0.72rem;
 }
@@ -956,24 +955,6 @@ input::placeholder {
 .form-message.error {
   background: var(--danger-soft);
   color: var(--danger);
-}
-
-.routing-output {
-  margin-top: 18px;
-  padding: 16px;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: var(--surface-soft);
-}
-
-#routing-json {
-  min-height: 190px;
-  padding: 12px;
-  resize: vertical;
-  border-radius: 9px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 0.72rem;
-  line-height: 1.5;
 }
 
 .dialog-actions {

@@ -16,9 +16,9 @@ Devs visual theme.
 
 The API key never goes into frontend code.
 
-This project intentionally has no application-level login. Run it only on a
-trusted machine or private network; do not expose it directly to the public
-internet without adding authentication and rate limiting.
+This project intentionally has no application-level login. It is built to run
+on your own machine, bound to loopback, as a single-user demo. Do not expose it
+directly to a network without adding authentication and rate limiting.
 
 ## Repository layout
 
@@ -26,68 +26,81 @@ internet without adding authentication and rate limiting.
 | --- | --- |
 | `app/` | Plain HTML, CSS, and JavaScript |
 | `server.py` | Static server, API proxy, and onboarding API |
-| `configure` | Command-line onboarding fallback |
 | `.env` | Local secrets and role settings; ignored by Git |
 | `.env.example` | Safe configuration template |
-| `portkey-role-routing-config.example.json` | Default routing template |
-| `portkey-model-console.service` | systemd unit |
-| `tests/` | Python unit and HTTP tests |
-| `scripts/check` | Complete local validation and tracked-secret check |
+| `portkey-role-routing-config.json` | Routing config written by onboarding; ignored by Git |
 
-Local development writes the generated routing file inside the repository as
-`portkey-role-routing-config.json`; that file is ignored by Git. The included
-systemd service instead uses `/root/portkey-role-routing-config.json`.
+## Running it
+
+No install step and no privileges are required:
+
+```bash
+python3 server.py
+```
+
+Then open `http://127.0.0.1:8080`. The server binds to loopback and listens on
+port 8080 by default; set `HOST` explicitly only when you intend to make it
+reachable from another machine.
 
 ## Onboarding
 
-Open the site and select **Setup**.
+There is nothing to configure before the first run. The app detects that setup
+is incomplete, reports what is missing, and opens **Setup** for you.
 
 1. Enter the service API key and LLM profile slug.
 2. Name the three roles.
 3. Enter a Google model for each role, or keep the defaults.
-4. Select **Save setup**.
-5. Copy the generated JSON into the saved gateway config attached to the
-   service key.
+4. Select **Save setup**. The dialog closes once the save succeeds.
 
-Saving writes `.env` and `/root/portkey-role-routing-config.json`. Existing
-installations require the current service key before setup can be changed.
+Saving creates `.env` and `portkey-role-routing-config.json` next to
+`server.py`, both owned by you with `0600` permissions, and both ignored by
+Git. The running server picks the change up immediately — no restart.
 
-CLI fallback:
+## Key verification
 
-```bash
-sudo ./configure
-```
+Before writing anything, the server checks the key with `GET /models` on the
+gateway:
 
-## Local development
+| Gateway response | Result |
+| --- | --- |
+| Success | Saved and marked verified |
+| `401` / `403` | Rejected — nothing is written |
+| Anything else, or unreachable | Saved, flagged **Key not verified** |
 
-```bash
-cp .env.example .env
-python3 server.py
-```
+Only an explicit 401/403 blocks a save, so an outage or a firewall never stops
+you configuring the app; the status pill reports that the key went unchecked.
+A key loaded from `.env` is re-checked in the background at startup, and a key
+that has since been revoked shows as **Key rejected**.
 
-Edit `.env`, then open `http://127.0.0.1:8080`. The development server binds to
-loopback by default. Set `HOST` explicitly only when you intend to make it
-reachable from another machine.
+Authorization is the key working, not the key matching what is already stored.
+That means a rotated key can be entered directly — the earlier rule required
+the old key to change the old key, so rotation was impossible from the GUI.
 
-Run the tests:
+## Gateway routing
 
-```bash
-./scripts/check
-```
+Each request carries `user_role` metadata, and the routing config sends it to a
+target named after the role:
 
-The check runs the Python test suite, syntax validation, JSON validation,
-whitespace checks, and a scan for common committed credential formats.
+| Role name | Role ID | Target |
+| --- | --- | --- |
+| Sales | `sales` | `sales_route` |
+| People Ops | `people-ops` | `people-ops_route` |
 
-## Deployment
+The role ID is the role name lowercased with non-alphanumerics collapsed to
+hyphens. Because the naming is derived rather than positional, the gateway
+config stays valid when roles are renamed or reordered — set it up once against
+the `<role>_route` convention. `portkey-role-routing-config.json` is written on
+every save as a reference copy of what the routing should look like.
 
-The production service runs from `/root/portkey-model-console`:
+`.env` is read at startup, but the service API key is deliberately never placed
+in the process environment, so it does not appear in `/proc/<pid>/environ` or
+get inherited by child processes.
 
-```bash
-systemctl restart portkey-model-console
-systemctl status portkey-model-console
-```
+To configure without the GUI, copy `.env.example` to `.env` and edit it by
+hand; the values are equivalent.
+
+## Before publishing
 
 `.env` is excluded by `.gitignore`; `.env.example` is the commit-safe template.
 The generated routing JSON, private-key formats, caches, and build output are
-also excluded. Before publishing, confirm `git status --ignored` shows `.env`
-as ignored and run `./scripts/check`.
+also excluded. Confirm `git status --ignored` shows `.env` as ignored.

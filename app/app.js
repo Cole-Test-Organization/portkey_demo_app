@@ -25,13 +25,13 @@ const roles = {
   hr: {
     label: "HR",
     description: "Balanced reasoning for people and policy workflows.",
-    model: "@gemini-example/gemini-3.6-flash",
+    model: "@gemini-example/gemini-3.5-flash",
     experience: experienceSlots[1],
   },
   devs: {
     label: "Devs",
     description: "Maximum capability for engineering and complex analysis.",
-    model: "@gemini-example/gemini-3.5-flash",
+    model: "@gemini-example/gemini-3.6-flash",
     experience: experienceSlots[2],
   },
 };
@@ -43,6 +43,7 @@ const state = {
   maxPromptChars: 32000,
   running: false,
   controller: null,
+  setupDetail: "",
 };
 
 const elements = {
@@ -74,9 +75,6 @@ const elements = {
   setupProviderSlug: document.querySelector("#setup-provider-slug"),
   setupRoleGroups: [...document.querySelectorAll(".role-setup")],
   setupMessage: document.querySelector("#setup-message"),
-  routingOutput: document.querySelector("#routing-output"),
-  routingJson: document.querySelector("#routing-json"),
-  copyRoutingJson: document.querySelector("#copy-routing-json"),
 };
 
 let savedRole = null;
@@ -169,9 +167,19 @@ function selectRole(role) {
   }
 }
 
+function hasRole(role) {
+  return typeof role === "string" && Object.hasOwn(roles, role);
+}
+
 function configureRoles(configuredRoles) {
   const entries = Object.entries(configuredRoles || {}).slice(0, 3);
-  if (entries.length !== 3) return;
+  if (entries.length !== 3) {
+    // Keeping the built-in roles would show options the server will reject.
+    renderError(
+      `The server reported ${entries.length} roles instead of 3. Open Setup to name all three.`,
+    );
+    return false;
+  }
 
   for (const role of Object.keys(roles)) delete roles[role];
 
@@ -185,10 +193,77 @@ function configureRoles(configuredRoles) {
   });
 
   const nextRole =
-    (savedRole && roles[savedRole] && savedRole) ||
-    (roles[state.role] && state.role) ||
+    (hasRole(savedRole) && savedRole) ||
+    (hasRole(state.role) && state.role) ||
     entries[0][0];
   selectRole(nextRole);
+  return true;
+}
+
+// Ordered by severity: the first matching issue drives the status pill.
+const setupIssues = [
+  {
+    id: "state-not-writable",
+    blocking: true,
+    status: "error",
+    summary: "Cannot save setup",
+    detail: (setup) =>
+      `Setup files are not writable${setup.stateDir ? ` in ${setup.stateDir}` : ""}. Fix the permissions on that folder, then reload.`,
+  },
+  {
+    id: "missing-service-key",
+    blocking: true,
+    status: "warning",
+    summary: "Setup required",
+    detail: () => "Add your service API key to start sending prompts.",
+  },
+  {
+    id: "key-rejected",
+    blocking: true,
+    status: "error",
+    summary: "Key rejected",
+    detail: () =>
+      "The AI gateway rejected the stored service API key. It may have been revoked or rotated — enter a current one.",
+  },
+  {
+    id: "key-unverified",
+    blocking: false,
+    status: "warning",
+    summary: "Key not verified",
+    detail: () =>
+      "The gateway could not be reached to confirm the service API key, so it was saved unchecked.",
+  },
+  {
+    id: "role-ids-adjusted",
+    blocking: false,
+    status: "warning",
+    summary: "Roles need attention",
+    detail: () =>
+      "The saved role IDs were invalid or duplicated, so defaults were substituted. Re-save Setup to fix them.",
+  },
+  {
+    id: "missing-routing-config",
+    blocking: false,
+    status: "warning",
+    summary: "Routing config not written",
+    detail: () =>
+      "Save Setup to write the routing file. Each role routes to its own <role>_route target.",
+  },
+];
+
+function applySetupStatus(setup) {
+  const reported = new Set(setup?.issues || []);
+  const active = setupIssues.filter((issue) => reported.has(issue.id));
+
+  if (active.length === 0) {
+    setStatus("ready", "Ready");
+    return { blocking: false };
+  }
+
+  const [primary] = active;
+  setStatus(primary.status, primary.summary);
+  state.setupDetail = active.map((issue) => issue.detail(setup || {})).join(" ");
+  return { blocking: active.some((issue) => issue.blocking) };
 }
 
 function applyPublicConfig(config) {
@@ -200,13 +275,9 @@ function applyPublicConfig(config) {
     elements.promptLimit.textContent = state.maxPromptChars.toLocaleString();
   }
 
+  state.setupDetail = "";
   configureRoles(config.roles);
-
-  if (state.configured) {
-    setStatus("ready", "Ready");
-  } else {
-    setStatus("warning", "Setup required");
-  }
+  return applySetupStatus(config.setup);
 }
 
 function updateCount() {
@@ -375,8 +446,11 @@ function showSetupMessage(kind, message) {
 
 function openSetup() {
   fillSetupForm();
-  elements.setupMessage.hidden = true;
-  elements.routingOutput.hidden = true;
+  if (state.setupDetail) {
+    showSetupMessage("error", state.setupDetail);
+  } else {
+    elements.setupMessage.hidden = true;
+  }
   if (!elements.setupDialog.open) elements.setupDialog.showModal();
   window.setTimeout(() => elements.setupProviderSlug.focus(), 0);
 }
@@ -409,14 +483,14 @@ async function saveSetup(event) {
       body: JSON.stringify(payload),
     });
     const result = await parseResponse(response);
-    applyPublicConfig(result.config);
-    elements.routingJson.value = JSON.stringify(result.routingConfig, null, 2);
-    elements.routingOutput.hidden = false;
+    const { blocking } = applyPublicConfig(result.config);
     elements.setupServiceKey.value = "";
-    showSetupMessage(
-      "success",
-      "Saved. Copy the generated JSON into your saved routing configuration.",
-    );
+    if (blocking) {
+      // Something still needs the operator's attention, so stay open and say so.
+      showSetupMessage("error", state.setupDetail);
+      return;
+    }
+    closeSetup();
   } catch (error) {
     showSetupMessage("error", error.message || "Setup could not be saved.");
   } finally {
@@ -456,8 +530,8 @@ async function loadConfig() {
       cache: "no-store",
     });
     const config = await parseResponse(response);
-    applyPublicConfig(config);
-    if (!state.configured) openSetup();
+    const { blocking } = applyPublicConfig(config);
+    if (blocking) openSetup();
   } catch {
     setStatus("error", "Service unavailable");
   }
@@ -500,19 +574,8 @@ elements.setupButton.addEventListener("click", openSetup);
 elements.setupClose.addEventListener("click", closeSetup);
 elements.setupCancel.addEventListener("click", closeSetup);
 elements.setupForm.addEventListener("submit", saveSetup);
-elements.copyRoutingJson.addEventListener("click", async () => {
-  try {
-    await navigator.clipboard.writeText(elements.routingJson.value);
-    elements.copyRoutingJson.textContent = "Copied";
-    window.setTimeout(() => {
-      elements.copyRoutingJson.textContent = "Copy JSON";
-    }, 1200);
-  } catch {
-    showSetupMessage("error", "Could not copy automatically. Select the JSON manually.");
-  }
-});
 
 applyTheme(initialTheme());
-selectRole(roles[savedRole] ? savedRole : "sales");
+selectRole(hasRole(savedRole) ? savedRole : "sales");
 updateCount();
 loadConfig();

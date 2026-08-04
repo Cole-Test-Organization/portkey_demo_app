@@ -8,8 +8,8 @@
       content="A simple role-based AI model routing demo."
     />
     <title>AI Role Demo</title>
-    <link rel="stylesheet" href="/styles.css?v=5" />
-    <script src="/app.js?v=5" defer></script>
+    <link rel="stylesheet" href="/styles.css?v=8" />
+    <script src="/app.js?v=8" defer></script>
   </head>
   <body>
     <header class="site-header">
@@ -164,7 +164,7 @@
 
         <div class="form-grid">
           <label class="form-field form-field-wide">
-            <span>Service API key</span>
+            <span>Portkey Service API Key</span>
             <input
               id="setup-service-key"
               name="serviceKey"
@@ -221,7 +221,7 @@
                 class="setup-role-model"
                 type="text"
                 required
-                value="gemini-3.6-flash"
+                value="gemini-3.5-flash"
               />
             </label>
           </fieldset>
@@ -238,27 +238,13 @@
                 class="setup-role-model"
                 type="text"
                 required
-                value="gemini-3.5-flash"
+                value="gemini-3.6-flash"
               />
             </label>
           </fieldset>
         </div>
 
         <p class="form-message" id="setup-message" role="status" hidden></p>
-
-        <section class="routing-output" id="routing-output" hidden>
-          <div class="field-row">
-            <label for="routing-json">Generated routing JSON</label>
-            <button class="text-button" id="copy-routing-json" type="button">
-              Copy JSON
-            </button>
-          </div>
-          <textarea id="routing-json" rows="9" readonly></textarea>
-          <small>
-            Paste this into the saved routing configuration attached to your
-            service key, then save it.
-          </small>
-        </section>
 
         <footer class="dialog-actions">
           <button class="button button-quiet" id="setup-cancel" type="button">

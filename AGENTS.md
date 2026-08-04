@@ -6,5 +6,4 @@
 - Preserve the safe local default of `HOST=127.0.0.1`.
 - Treat the no-auth design as suitable only for trusted local/private networks.
 - Render all gateway-controlled text with `textContent`, never HTML injection.
-- Run `./scripts/check` after changing server, frontend, setup, or deployment
-  files.
+- Keep the repo minimal: no test suite, CI, or helper scripts.

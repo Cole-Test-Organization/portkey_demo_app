@@ -7,14 +7,14 @@ the browser.
 
 from __future__ import annotations
 
-import hmac
 import json
 import logging
 import mimetypes
 import os
 import re
 import socket
-import stat
+import tempfile
+import unicodedata
 import threading
 import time
 import urllib.error
@@ -31,14 +31,23 @@ APP_DIR = Path(os.environ.get("APP_DIR", BASE_DIR / "app")).resolve()
 ENV_FILE = Path(os.environ.get("PORTKEY_ENV_FILE", BASE_DIR / ".env")).resolve()
 
 
-def load_environment_file(path: Path) -> None:
-    """Load a small KEY=VALUE file without shell evaluation or expansion."""
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except FileNotFoundError:
-        return
+SECRET_ENVIRONMENT_KEYS = frozenset({"PORTKEY_API_KEY"})
 
-    for line_number, line in enumerate(lines, start=1):
+
+def load_environment_file(path: Path) -> dict[str, str]:
+    """Load a small KEY=VALUE file without shell evaluation or expansion.
+
+    Every parsed value is returned to the caller, but secrets are deliberately
+    kept out of ``os.environ`` so the key is not exposed through the process
+    environment or inherited by any child process.
+    """
+    try:
+        content = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+
+    values: dict[str, str] = {}
+    for line_number, line in enumerate(content.split("\n"), start=1):
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
@@ -63,10 +72,14 @@ def load_environment_file(path: Path) -> None:
         elif value.startswith("'") or value.endswith(("'", '"')):
             raise ValueError(f"Invalid environment quoting on line {line_number}.")
 
-        os.environ.setdefault(key, value)
+        values[key] = value
+        if key not in SECRET_ENVIRONMENT_KEYS:
+            os.environ.setdefault(key, value)
+
+    return values
 
 
-load_environment_file(ENV_FILE)
+FILE_ENVIRONMENT = load_environment_file(ENV_FILE)
 
 ROUTING_CONFIG_PATH = Path(
     os.environ.get(
@@ -74,7 +87,6 @@ ROUTING_CONFIG_PATH = Path(
         BASE_DIR / "portkey-role-routing-config.json",
     )
 ).resolve()
-ROUTING_CONFIG_TEMPLATE_PATH = BASE_DIR / "portkey-role-routing-config.example.json"
 
 
 def normalize_gateway_url(value: str) -> str:
@@ -95,7 +107,9 @@ def normalize_gateway_url(value: str) -> str:
 GATEWAY_URL = normalize_gateway_url(
     os.environ.get("PORTKEY_GATEWAY_URL", "https://aigw.portkey.ai/v1")
 )
-PORTKEY_API_KEY = os.environ.get("PORTKEY_API_KEY", "").strip()
+PORTKEY_API_KEY = (
+    os.environ.get("PORTKEY_API_KEY") or FILE_ENVIRONMENT.get("PORTKEY_API_KEY", "")
+).strip()
 PROVIDER_SLUG = os.environ.get("PORTKEY_PROVIDER_SLUG", "gemini-example").strip()
 REQUEST_TIMEOUT = min(max(int(os.environ.get("REQUEST_TIMEOUT", "90")), 5), 300)
 MAX_GATEWAY_RESPONSE_BYTES = min(
@@ -105,6 +119,11 @@ MAX_GATEWAY_RESPONSE_BYTES = min(
 MAX_PROMPT_CHARS = min(
     max(int(os.environ.get("MAX_PROMPT_CHARS", "32000")), 1000), 250000
 )
+KEY_VERIFY_TIMEOUT = min(max(int(os.environ.get("KEY_VERIFY_TIMEOUT", "10")), 2), 60)
+
+# Result of the last gateway check on the stored key. "unknown" means no check
+# has completed yet, so the GUI stays quiet rather than nagging on every boot.
+KEY_STATUS = "unknown"
 
 DEFAULT_ROLE_SLOTS: tuple[dict[str, str], ...] = (
     {
@@ -117,13 +136,13 @@ DEFAULT_ROLE_SLOTS: tuple[dict[str, str], ...] = (
         "id": "hr",
         "label": "HR",
         "description": "Balanced reasoning for people and policy workflows.",
-        "model": "gemini-3.6-flash",
+        "model": "gemini-3.5-flash",
     },
     {
         "id": "devs",
         "label": "Devs",
         "description": "Maximum capability for engineering and complex analysis.",
-        "model": "gemini-3.5-flash",
+        "model": "gemini-3.6-flash",
     },
 )
 CONFIG_LOCK = threading.RLock()
@@ -145,6 +164,20 @@ def clean_model_id(value: str) -> str:
     if model.startswith("@") and "/" in model:
         model = model.split("/", 1)[1]
     return model
+
+
+def clean_service_key(value: str) -> str:
+    """Remove paste artifacts from a service key.
+
+    Copying a key out of a dashboard or PDF routinely picks up zero-width
+    characters, byte-order marks, and non-breaking spaces. None of them are
+    meaningful in a key, so drop them rather than rejecting a correct paste.
+    """
+    return "".join(
+        char
+        for char in value
+        if not char.isspace() and unicodedata.category(char) != "Cf"
+    )
 
 
 def role_id_from_label(label: str) -> str:
@@ -170,8 +203,16 @@ def roles_from_environment() -> dict[str, dict[str, str]]:
         model = os.environ.get(
             f"PORTKEY_ROLE_{slot}_MODEL", defaults["model"]
         ).strip()
-        if not role_id or role_id in roles:
-            role_id = defaults["id"]
+        # Fall back until the slot has an unused ID. Reusing the slot default
+        # unconditionally could collide again and silently drop a whole role.
+        role_id = next(
+            (
+                candidate
+                for candidate in (role_id, defaults["id"], f"role-{slot}")
+                if candidate and candidate not in roles
+            ),
+            f"role-slot-{slot}",
+        )
         if not label:
             label = defaults["label"]
         if not model:
@@ -195,14 +236,16 @@ ROLES = roles_from_environment()
 
 
 def role_models_from_routing_config() -> dict[str, str]:
-    """Derive the GUI model labels from the Portkey routing artifact."""
+    """Derive the GUI model labels from the Portkey routing artifact.
+
+    Before onboarding writes the artifact there is nothing to read, which is an
+    expected state rather than a fault: callers fall back to the models declared
+    in the environment, so an absent file returns an empty mapping silently.
+    """
+    if not ROUTING_CONFIG_PATH.is_file():
+        return {}
     try:
-        source_path = (
-            ROUTING_CONFIG_PATH
-            if ROUTING_CONFIG_PATH.is_file()
-            else ROUTING_CONFIG_TEMPLATE_PATH
-        )
-        config = json.loads(source_path.read_text(encoding="utf-8"))
+        config = json.loads(ROUTING_CONFIG_PATH.read_text(encoding="utf-8"))
         targets = {
             target["name"]: target.get("override_params", {}).get("model")
             for target in config.get("targets", [])
@@ -228,6 +271,95 @@ def role_models_from_routing_config() -> dict[str, str]:
         return {}
 
 
+def verify_service_key(service_key: str) -> str:
+    """Ask the gateway whether a key works.
+
+    Returns "verified", "rejected", or "unverified". Only an explicit 401/403
+    counts as rejection; anything else (unreachable gateway, missing endpoint,
+    upstream outage) is inconclusive, so setup is never blocked by a problem
+    that has nothing to do with the key.
+    """
+    request = urllib.request.Request(
+        f"{GATEWAY_URL}/models",
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "portkey-model-console/1.0",
+            "x-portkey-api-key": service_key,
+        },
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=KEY_VERIFY_TIMEOUT) as response:
+            response.read(8192)
+            return "verified"
+    except urllib.error.HTTPError as exc:
+        if exc.code in {401, 403}:
+            return "rejected"
+        LOGGER.info("Key check inconclusive: gateway returned HTTP %s", exc.code)
+        return "unverified"
+    except (urllib.error.URLError, socket.timeout, TimeoutError, OSError) as exc:
+        LOGGER.info("Key check inconclusive: %s", exc)
+        return "unverified"
+
+
+def refresh_key_status() -> str:
+    """Re-check the stored key and remember the outcome."""
+    global KEY_STATUS
+    with CONFIG_LOCK:
+        key = PORTKEY_API_KEY
+    status = verify_service_key(key) if key else "unknown"
+    with CONFIG_LOCK:
+        KEY_STATUS = status
+    return status
+
+
+def state_path_writable(path: Path) -> bool:
+    """Report whether the app could create or replace a state file.
+
+    Saving creates any missing parent directories, so a path that does not
+    exist yet is writable as long as its nearest existing ancestor is.
+    """
+    if path.is_file():
+        return os.access(path, os.W_OK)
+    return next(
+        (
+            os.access(ancestor, os.W_OK)
+            for ancestor in path.parents
+            if ancestor.is_dir()
+        ),
+        False,
+    )
+
+
+def setup_status() -> dict[str, Any]:
+    """Describe what onboarding still needs so the GUI can prompt for it."""
+    issues: list[str] = []
+    if not PORTKEY_API_KEY:
+        issues.append("missing-service-key")
+    elif KEY_STATUS == "rejected":
+        issues.append("key-rejected")
+    elif KEY_STATUS == "unverified":
+        issues.append("key-unverified")
+    if not ROUTING_CONFIG_PATH.is_file():
+        issues.append("missing-routing-config")
+
+    declared_ids = [
+        os.environ.get(f"PORTKEY_ROLE_{slot}_ID", "").strip()
+        for slot in range(1, len(DEFAULT_ROLE_SLOTS) + 1)
+    ]
+    if any(role_id and role_id not in ROLES for role_id in declared_ids):
+        issues.append("role-ids-adjusted")
+
+    status: dict[str, Any] = {"issues": issues}
+    if not all(
+        state_path_writable(path) for path in (ENV_FILE, ROUTING_CONFIG_PATH)
+    ):
+        # Only disclose the location when the operator has to go fix it.
+        issues.append("state-not-writable")
+        status["stateDir"] = str(ENV_FILE.parent)
+    return status
+
+
 def public_config() -> dict[str, Any]:
     """Return browser-safe application configuration."""
     with CONFIG_LOCK:
@@ -236,6 +368,7 @@ def public_config() -> dict[str, Any]:
             "configured": bool(PORTKEY_API_KEY),
             "providerSlug": clean_provider_slug(PROVIDER_SLUG),
             "maxPromptChars": MAX_PROMPT_CHARS,
+            "setup": setup_status(),
             "roles": {
                 role: {
                     **profile,
@@ -253,11 +386,25 @@ def validate_onboarding(
     provider_slug = payload.get("providerSlug")
     role_inputs = payload.get("roles")
 
-    if not isinstance(service_key, str) or not service_key.strip():
+    if not isinstance(service_key, str):
         raise ValueError("Enter the service API key.")
-    service_key = service_key.strip()
-    if len(service_key) > 1000 or any(ord(char) < 32 for char in service_key):
-        raise ValueError("The service API key is invalid.")
+    service_key = clean_service_key(service_key)
+    if not service_key:
+        raise ValueError("Enter the service API key.")
+    if len(service_key) > 1000:
+        raise ValueError("The service API key is too long.")
+    # Printable ASCII only. Keys are sent as an HTTP header value, where
+    # non-ASCII bytes are not representable.
+    unsupported = next(
+        (char for char in service_key if not "\x21" <= char <= "\x7e"), ""
+    )
+    if unsupported:
+        name = unicodedata.name(unsupported, "an unsupported character")
+        raise ValueError(
+            f"The service API key contains {name} (U+{ord(unsupported):04X}). "
+            "It may have picked up a look-alike character when copied; "
+            "try retyping it."
+        )
 
     if not isinstance(provider_slug, str):
         raise ValueError("Enter the provider profile slug.")
@@ -307,8 +454,10 @@ def build_routing_config(
     conditions: list[dict[str, Any]] = []
     targets: list[dict[str, Any]] = []
 
-    for index, role in enumerate(roles, start=1):
-        target_name = f"role-{index}-route"
+    # Name each target after its role so the gateway config is stable no matter
+    # which slot a role occupies, and predictable without copying JSON around.
+    for role in roles:
+        target_name = f"{role['id']}_route"
         conditions.append(
             {
                 "query": {"metadata.user_role": {"$eq": role["id"]}},
@@ -328,14 +477,19 @@ def build_routing_config(
         "strategy": {
             "mode": "conditional",
             "conditions": conditions,
-            "default": "role-1-route",
+            "default": targets[0]["name"],
         },
         "targets": targets,
     }
 
 
 def quote_environment_value(value: str) -> str:
-    return value.replace("\\", "\\\\").replace('"', '\\"')
+    """Encode exactly as load_environment_file decodes.
+
+    json.dumps escapes non-ASCII, so line separators such as U+2028 are written
+    as text rather than as characters that would split the line on reload.
+    """
+    return json.dumps(value)
 
 
 def render_environment(
@@ -345,7 +499,6 @@ def render_environment(
         ("PORTKEY_API_KEY", service_key),
         ("PORTKEY_GATEWAY_URL", GATEWAY_URL),
         ("PORTKEY_PROVIDER_SLUG", provider_slug),
-        ("PORTKEY_ROLE_COUNT", "3"),
     ]
     for index, role in enumerate(roles, start=1):
         values.extend(
@@ -356,26 +509,38 @@ def render_environment(
             ]
         )
     return "".join(
-        f'{key}="{quote_environment_value(value)}"\n' for key, value in values
+        f"{key}={quote_environment_value(value)}\n" for key, value in values
     )
 
 
 def overwrite_state_file(path: Path, content: str) -> None:
-    """Create or update a regular state file without following symlinks."""
-    flags = os.O_WRONLY | os.O_CREAT
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    descriptor = os.open(path, flags, 0o600)
-    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-        os.close(descriptor)
-        raise OSError(f"State path is not a regular file: {path}")
+    """Replace a state file atomically with owner-only permissions.
 
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        handle.seek(0)
-        handle.write(content)
-        handle.truncate()
-        handle.flush()
-        os.fsync(handle.fileno())
+    Writing a sibling temporary file and renaming it means a failed or
+    interrupted save never leaves a half-written file behind, and the rename
+    replaces any symlink at the destination instead of writing through it.
+    """
+    directory = path.parent
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    descriptor, temporary_path = tempfile.mkstemp(
+        dir=directory, prefix=f".{path.name}.", suffix=".tmp"
+    )
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+    except BaseException:
+        os.unlink(temporary_path)
+        raise
+
+    directory_descriptor = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(directory_descriptor)
+    finally:
+        os.close(directory_descriptor)
 
 
 def save_onboarding(
@@ -387,11 +552,13 @@ def save_onboarding(
     environment = render_environment(service_key, provider_slug, roles)
 
     with CONFIG_LOCK:
+        # .env governs behaviour, the routing JSON is a paste-able artifact, so
+        # persist the credential first and only adopt the config once both land.
+        overwrite_state_file(ENV_FILE, environment)
         overwrite_state_file(
             ROUTING_CONFIG_PATH,
             json.dumps(routing_config, indent=2) + "\n",
         )
-        overwrite_state_file(ENV_FILE, environment)
 
         PORTKEY_API_KEY = service_key
         PROVIDER_SLUG = provider_slug
@@ -642,12 +809,14 @@ class AppHandler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
             return
 
-        with CONFIG_LOCK:
-            current_key = PORTKEY_API_KEY
-        if current_key and not hmac.compare_digest(service_key, current_key):
+        # Authorize on whether the key actually works, not on whether it matches
+        # the one already stored. Matching the stored value made key rotation
+        # impossible: changing a rotated key required knowing the old one.
+        key_status = verify_service_key(service_key)
+        if key_status == "rejected":
             self._json(
                 HTTPStatus.FORBIDDEN,
-                {"error": "The service API key does not match the current setup."},
+                {"error": "The AI gateway rejected this service API key."},
             )
             return
 
@@ -660,6 +829,10 @@ class AppHandler(BaseHTTPRequestHandler):
                 {"error": "The server could not save the setup files."},
             )
             return
+
+        global KEY_STATUS
+        with CONFIG_LOCK:
+            KEY_STATUS = key_status
 
         self._json(
             HTTPStatus.OK,
@@ -813,6 +986,11 @@ def main() -> None:
     port = int(os.environ.get("PORT", "8080"))
     if not APP_DIR.is_dir():
         raise SystemExit(f"SPA asset directory does not exist: {APP_DIR}")
+
+    if PORTKEY_API_KEY:
+        # Re-check a key loaded from .env off the request path, so a slow or
+        # unreachable gateway never delays the first page load.
+        threading.Thread(target=refresh_key_status, daemon=True).start()
 
     server = ThreadingHTTPServer((host, port), AppHandler)
     LOGGER.info(
